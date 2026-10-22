@@ -33,9 +33,20 @@ El registro local funciona sin configuración. Para habilitar Google y autentica
 3. En **Authentication → Settings → Authorized domains**, añade `juanffx3-beep.github.io`.
 4. Copia la configuración de tu app web a [`js/firebase-config.js`](js/firebase-config.js).
 
+## Conectar Spotify
+
+VYREX integra Spotify mediante OAuth con PKCE y el Web Playback SDK. El **Client ID** público ya está configurado en [`js/spotify.js`](js/spotify.js); no se incluye ni se necesita un Client Secret en esta web estática.
+
+1. En tu aplicación de Spotify for Developers, conserva este Redirect URI exacto: `https://juanffx3-beep.github.io/VYREX` (sin `/` final).
+2. Activa **Web API** y **Web Playback SDK**.
+3. Inicia sesión en VYREX, abre **Cuenta** y selecciona **Conectar Spotify**.
+4. Busca música desde **Buscar**. El catálogo se consulta directamente en Spotify y el audio nunca se copia o se aloja en VYREX.
+
+La reproducción dentro del navegador depende de una cuenta de Spotify elegible para el [Web Playback SDK](https://developer.spotify.com/documentation/web-playback-sdk), normalmente Spotify Premium. El plan VIP de VYREX no cambia los requisitos ni la suscripción de Spotify.
+
 ## Publicación
 
-Este repositorio está preparado para GitHub Pages. Tras habilitar Pages desde la rama `main` y la carpeta raíz, estará disponible en:
+VYREX está publicado en GitHub Pages desde la rama `main` y la carpeta raíz:
 
 `https://juanffx3-beep.github.io/VYREX/`
 

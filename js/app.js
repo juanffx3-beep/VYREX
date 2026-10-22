@@ -1,6 +1,7 @@
 import { TRACKS, ARTISTS, PLAYLISTS, GENRES, trackById, artistById, playlistById, coverUrl } from './data.js';
 import { icon } from './icons.js';
 import * as Auth from './auth.js';
+import * as Spotify from './spotify.js';
 
 // ---------- Reglas de los planes ----------
 const SONGS_BETWEEN_ADS = 3;   // Free: anuncio cada 3 canciones
@@ -40,6 +41,20 @@ const logo = (cls = '') => `<img class="logo-img ${cls}" src="${LOGO_SRC}" alt="
 const state = {
   user: null,
   plan: 'free',
+  playbackProvider: 'local',
+  spotify: {
+    connected: false,
+    ready: false,
+    profile: null,
+    track: null,
+    paused: true,
+    position: 0,
+    duration: 0,
+    results: [],
+    loading: false,
+    error: '',
+    searchRequest: 0,
+  },
   liked: new Set(),
   downloaded: new Set(),
   skips: [],
@@ -127,6 +142,9 @@ function playContext(ctx, index = 0) {
   const ids = contextIds(ctx);
   if (!ids.length) return toast('Aún no hay canciones aquí');
   if (state.inAd) return toast('Tu música sigue después del anuncio');
+  if (state.playbackProvider === 'spotify') Spotify.pause().catch(() => {});
+  state.playbackProvider = 'local';
+  state.spotify.track = null;
   state.contextId = ctx;
   state.baseQueue = ids.slice();
   if (state.shuffle) {
@@ -142,6 +160,7 @@ function playContext(ctx, index = 0) {
 function startCurrent() {
   const t = trackById(state.queue[state.queueIndex]);
   if (!t) return;
+  state.playbackProvider = 'local';
   if (!isVip() && state.songsSinceAd >= SONGS_BETWEEN_ADS) {
     state.songsSinceAd = 0;
     playAd(startCurrent);
@@ -155,6 +174,9 @@ function startCurrent() {
 }
 
 function togglePlay() {
+  if (state.playbackProvider === 'spotify' && state.spotify.track) {
+    return (state.spotify.paused ? Spotify.resume() : Spotify.pause()).catch((err) => toast(err.message));
+  }
   if (state.inAd) return toast('Tu música sigue después del anuncio');
   if (!state.currentId) return playContext('p1');
   if (audio.paused) audio.play().catch(() => {});
@@ -175,6 +197,9 @@ function canSkip() {
 }
 
 function next(userInitiated = true) {
+  if (state.playbackProvider === 'spotify' && state.spotify.track) {
+    return Spotify.next().catch((err) => toast(err.message));
+  }
   if (state.inAd) return toast('Tu música sigue después del anuncio');
   if (!state.queue.length) return;
   if (userInitiated && !canSkip()) return;
@@ -191,6 +216,9 @@ function next(userInitiated = true) {
 }
 
 function prev() {
+  if (state.playbackProvider === 'spotify' && state.spotify.track) {
+    return Spotify.previous().catch((err) => toast(err.message));
+  }
   if (state.inAd) return toast('Tu música sigue después del anuncio');
   if (!state.queue.length) return;
   if (audio.currentTime > 3 || state.queueIndex === 0) {
@@ -225,12 +253,13 @@ function toggleRepeat() {
 function stopPlayback() {
   audio.pause();
   audio.removeAttribute('src');
+  if (state.playbackProvider === 'spotify') Spotify.pause().catch(() => {});
   clearInterval(state.adTimer);
   state.inAd = false;
   state.afterAd = null;
   $('#ad-banner').hidden = true;
   $('#player').classList.remove('ad-mode');
-  Object.assign(state, { queue: [], baseQueue: [], queueIndex: -1, contextId: null, currentId: null, songsSinceAd: 0 });
+  Object.assign(state, { playbackProvider: 'local', queue: [], baseQueue: [], queueIndex: -1, contextId: null, currentId: null, songsSinceAd: 0 });
 }
 
 function resetPlayerUI() {
@@ -321,6 +350,7 @@ function setProgressUI(ratio, cur, dur) {
 }
 
 function updateNowPlaying() {
+  if (state.playbackProvider === 'spotify' && state.spotify.track) return updateSpotifyNowPlaying();
   const t = trackById(state.currentId);
   if (!t) return;
   const a = artistById(t.artistId);
@@ -329,6 +359,7 @@ function updateNowPlaying() {
   $('#np-title').innerHTML = `<a href="#/playlist/${esc(state.contextId)}">${esc(t.title)}</a>`;
   if (!playlistById(state.contextId)) $('#np-title').textContent = t.title;
   $('#np-artist').innerHTML = `<a href="#/artist/${a.id}">${esc(a.name)}</a>`;
+  $('#np-like').hidden = false;
   document.title = `${t.title} • ${a.name} | VYREX`;
   updateLikeButtons(t.id);
   updatePlayingIndicators();
@@ -342,8 +373,30 @@ function updateNowPlaying() {
   }
 }
 
+function updateSpotifyNowPlaying() {
+  const t = state.spotify.track;
+  if (!t) return;
+  $('#np-cover').src = t.image || LOGO_SRC;
+  $('#np-cover').alt = `Portada de ${t.album || t.title}`;
+  $('#np-title').textContent = t.title;
+  $('#np-artist').textContent = t.artists;
+  $('#np-like').hidden = true;
+  document.title = `${t.title} • ${t.artists} | VYREX`;
+  setProgressUI(state.spotify.position / Math.max(1, state.spotify.duration), state.spotify.position / 1000, state.spotify.duration / 1000);
+  if ('mediaSession' in navigator) {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: t.title,
+      artist: t.artists,
+      album: t.album,
+      artwork: t.image ? [{ src: t.image, sizes: '300x300', type: 'image/jpeg' }] : [],
+    });
+  }
+  updatePlayButtons();
+}
+
 function updatePlayButtons() {
-  const playing = !audio.paused && !state.inAd;
+  const spotifyPlaying = state.playbackProvider === 'spotify' && state.spotify.track && !state.spotify.paused;
+  const playing = spotifyPlaying || (!audio.paused && !state.inAd);
   document.body.classList.toggle('is-paused', !playing);
   const btn = $('#btn-play');
   btn.innerHTML = icon(playing ? 'pause' : 'play', 18);
@@ -379,6 +432,7 @@ function updateModeButtons() {
 function updateVolumeUI() {
   const v = state.muted ? 0 : state.volume;
   audio.volume = v;
+  if (state.playbackProvider === 'spotify') Spotify.setVolume(v).catch(() => {});
   const range = $('#volume');
   range.value = Math.round(v * 100);
   range.style.setProperty('--val', `${v * 100}%`);
@@ -588,6 +642,29 @@ function viewSearch() {
   return { color: '#2a2a2a', html: '<div class="page"><div id="search-results"></div></div>', after: renderSearchResults };
 }
 
+function spotifySearchSection(query) {
+  if (!query || !Spotify.isConfigured) return '';
+  if (!state.spotify.connected) {
+    return `<section class="spotify-panel">
+      <div><span class="spotify-label">Spotify</span><h2 class="section-title">Busca en el catálogo de Spotify</h2><p>Conecta tu cuenta para ver canciones, álbumes y artistas disponibles en Spotify.</p></div>
+      <button class="btn-primary sm" data-action="spotify-connect">Conectar Spotify</button>
+    </section>`;
+  }
+  if (state.spotify.loading) return '<section class="spotify-panel"><span class="spotify-label">Spotify</span><p>Buscando en Spotify…</p></section>';
+  if (state.spotify.error) return `<section class="spotify-panel spotify-error"><span class="spotify-label">Spotify</span><p>${esc(state.spotify.error)}</p></section>`;
+  if (!state.spotify.results.length) return '<section class="spotify-panel"><span class="spotify-label">Spotify</span><p>No encontramos canciones de Spotify para esta búsqueda.</p></section>';
+  return `<section class="spotify-panel spotify-results">
+    <header><div><span class="spotify-label">Spotify</span><h2 class="section-title">Canciones de Spotify</h2></div><span class="spotify-note">Requiere Spotify Premium para reproducir</span></header>
+    <div class="spotify-list">${state.spotify.results.map((t) => `
+      <button class="spotify-row" data-action="spotify-play" data-spotify-id="${esc(t.id)}" aria-label="Reproducir ${esc(t.title)} en Spotify">
+        <img src="${esc(t.image || LOGO_SRC)}" alt="" loading="lazy">
+        <span class="spotify-track"><b>${esc(t.title)}</b><small>${esc(t.artists)} · ${esc(t.album)}</small></span>
+        <span class="spotify-duration">${fmt(t.duration / 1000)}</span>
+        <span class="spotify-play">${icon('play', 18)}</span>
+      </button>`).join('')}</div>
+  </section>`;
+}
+
 function renderSearchResults() {
   const host = $('#search-results');
   if (!host) return;
@@ -608,41 +685,39 @@ function renderSearchResults() {
   const artists = ARTISTS.filter((a) => normalize(a.name).includes(q));
   const playlists = PLAYLISTS.filter((p) => normalize(`${p.name} ${p.desc}`).includes(q));
   state.searchIds = tracks.map((t) => t.id);
+  let localResults = '';
   if (!tracks.length && !artists.length && !playlists.length) {
-    host.innerHTML = `
-      <div class="empty">
-        <h2>No se encontraron resultados para "${esc(state.searchQuery)}"</h2>
-        <p>Revisa la ortografía o usa otras palabras.</p>
-      </div>`;
-    return;
+    localResults = `<div class="empty"><h2>No hay resultados locales para "${esc(state.searchQuery)}"</h2><p>Prueba con otras palabras o explora Spotify.</p></div>`;
+  } else {
+    let top = '';
+    if (artists[0] || tracks[0]) {
+      const a = artists[0];
+      const t = !a && tracks[0];
+      top = `
+        <section class="top-result">
+          <h2 class="section-title">Resultado principal</h2>
+          ${a ? `
+            <a class="top-card" href="#/artist/${a.id}">
+              <img class="round" src="${coverUrl(a.image, 200)}" alt="">
+              <strong>${esc(a.name)}</strong><span class="pill">Artista</span>
+              ${playFab(`artist:${a.id}`, 24)}
+            </a>` : `
+            <div class="top-card" role="button" tabindex="0" data-action="play-track" data-context="search" data-index="0" data-track-id="${t.id}">
+              <img src="${coverUrl(t.cover, 200)}" alt="">
+              <strong>${esc(t.title)}</strong><span class="pill">Canción · ${esc(artistById(t.artistId).name)}</span>
+              <span class="play-fab" aria-hidden="true">${icon('play', 24)}</span>
+            </div>`}
+        </section>`;
+    }
+    localResults = `
+      <div class="search-top">
+        ${top}
+        ${tracks.length ? `<section class="songs-result"><h2 class="section-title">Canciones VYREX</h2>${trackTable(tracks.slice(0, 5).map((t) => t.id), 'search', { album: false })}</section>` : ''}
+      </div>
+      ${artists.length ? shelf('Artistas VYREX', artists.map(artistCard)) : ''}
+      ${playlists.length ? shelf('Playlists VYREX', playlists.map(playlistCard)) : ''}`;
   }
-  let top = '';
-  if (artists[0] || tracks[0]) {
-    const a = artists[0];
-    const t = !a && tracks[0];
-    top = `
-      <section class="top-result">
-        <h2 class="section-title">Resultado principal</h2>
-        ${a ? `
-          <a class="top-card" href="#/artist/${a.id}">
-            <img class="round" src="${coverUrl(a.image, 200)}" alt="">
-            <strong>${esc(a.name)}</strong><span class="pill">Artista</span>
-            ${playFab(`artist:${a.id}`, 24)}
-          </a>` : `
-          <div class="top-card" role="button" tabindex="0" data-action="play-track" data-context="search" data-index="0" data-track-id="${t.id}">
-            <img src="${coverUrl(t.cover, 200)}" alt="">
-            <strong>${esc(t.title)}</strong><span class="pill">Canción · ${esc(artistById(t.artistId).name)}</span>
-            <span class="play-fab" aria-hidden="true">${icon('play', 24)}</span>
-          </div>`}
-      </section>`;
-  }
-  host.innerHTML = `
-    <div class="search-top">
-      ${top}
-      ${tracks.length ? `<section class="songs-result"><h2 class="section-title">Canciones</h2>${trackTable(tracks.slice(0, 5).map((t) => t.id), 'search', { album: false })}</section>` : ''}
-    </div>
-    ${artists.length ? shelf('Artistas', artists.map(artistCard)) : ''}
-    ${playlists.length ? shelf('Playlists', playlists.map(playlistCard)) : ''}`;
+  host.innerHTML = `${localResults}${spotifySearchSection(q)}`;
   updatePlayingIndicators();
 }
 
@@ -826,6 +901,17 @@ function avatar(cls = '') {
   return `<span class="avatar ${cls}" aria-hidden="true">${esc((u?.name || '?').charAt(0).toUpperCase())}</span>`;
 }
 
+function spotifyAccountPanel() {
+  if (!Spotify.isConfigured) return '';
+  const s = state.spotify;
+  if (s.connected) {
+    const name = s.profile?.name || 'Cuenta conectada';
+    const product = s.profile?.product ? `Spotify ${s.profile.product}` : 'Spotify conectado';
+    return `<section class="spotify-account"><div class="spotify-account-head"><span class="spotify-label">Spotify</span><div><h2>${esc(name)}</h2><p>${esc(product)}${s.ready ? ' · Reproductor listo' : ' · Preparando reproductor…'}</p></div></div><button class="btn-outline sm" data-action="spotify-disconnect">Desconectar Spotify</button></section>`;
+  }
+  return `<section class="spotify-account"><div class="spotify-account-head"><span class="spotify-label">Spotify</span><div><h2>Conecta tu Spotify</h2><p>Busca el catálogo de Spotify y escucha desde VYREX con una cuenta Premium elegible.</p></div></div><button class="btn-primary sm" data-action="spotify-connect">Conectar Spotify</button></section>`;
+}
+
 function viewAccount() {
   const u = state.user;
   const now = Date.now();
@@ -848,6 +934,7 @@ function viewAccount() {
           <div class="stat"><b>${isVip() ? '∞' : Math.max(0, skipsLeft)}</b><span>Saltos disponibles esta hora</span></div>
           <div class="stat"><b>${u.provider === 'google' ? 'Google' : 'Correo'}</b><span>Método de acceso</span></div>
         </div>
+        ${spotifyAccountPanel()}
         <div class="account-actions">
           <a class="btn-primary" href="#/premium">${isVip() ? 'Gestionar plan' : 'Hazte VIP'}</a>
           <button class="btn-outline" data-action="logout">${icon('logout', 16)} Cerrar sesión</button>
@@ -1023,7 +1110,98 @@ function confirmVipModal() {
 }
 
 // ---------- Acciones (delegación de eventos) ----------
+let spotifySearchTimer = null;
+
+function queueSpotifySearch(query) {
+  const request = ++state.spotify.searchRequest;
+  clearTimeout(spotifySearchTimer);
+  state.spotify.error = '';
+  if (!query.trim() || !state.spotify.connected) {
+    state.spotify.loading = false;
+    state.spotify.results = [];
+    return;
+  }
+  state.spotify.loading = true;
+  renderSearchResults();
+  spotifySearchTimer = setTimeout(async () => {
+    try {
+      const results = await Spotify.searchTracks(query);
+      if (request !== state.spotify.searchRequest) return;
+      state.spotify.results = results;
+    } catch (err) {
+      if (request !== state.spotify.searchRequest) return;
+      state.spotify.results = [];
+      state.spotify.error = err.message || 'No se pudo buscar en Spotify.';
+    } finally {
+      if (request === state.spotify.searchRequest) {
+        state.spotify.loading = false;
+        if (parseRoute().view === 'search') renderSearchResults();
+      }
+    }
+  }, 350);
+}
+
+async function connectSpotify() {
+  try {
+    await Spotify.connect(state.user?.uid);
+  } catch (err) {
+    toast(err.message || 'No se pudo conectar con Spotify.');
+  }
+}
+
+async function disconnectSpotify() {
+  await Spotify.disconnect();
+  Object.assign(state.spotify, { connected: false, ready: false, profile: null, track: null, paused: true, position: 0, duration: 0, results: [], loading: false, error: '' });
+  if (state.playbackProvider === 'spotify') {
+    state.playbackProvider = 'local';
+    resetPlayerUI();
+  }
+  route({ keepScroll: true });
+  toast('Spotify se desconectó de VYREX.');
+}
+
+async function playSpotifyTrack(id) {
+  const track = state.spotify.results.find((item) => item.id === id);
+  if (!track) return toast('No se encontró esta canción de Spotify.');
+  try {
+    audio.pause();
+    audio.removeAttribute('src');
+    state.currentId = null;
+    state.contextId = null;
+    state.playbackProvider = 'spotify';
+    Object.assign(state.spotify, { track, paused: true, position: 0, duration: track.duration });
+    updateSpotifyNowPlaying();
+    await Spotify.play(track.uri);
+  } catch (err) {
+    state.playbackProvider = 'local';
+    toast(err.message || 'Spotify no pudo reproducir esta canción.');
+  }
+}
+
+function handleSpotifyEvent(event) {
+  if (event.type === 'connection') {
+    state.spotify.connected = event.connected;
+    state.spotify.ready = event.ready;
+    state.spotify.profile = event.profile;
+    if (!event.connected) state.spotify.results = [];
+    if (state.user && ['account', 'search'].includes(parseRoute().view)) route({ keepScroll: true });
+  }
+  if (event.type === 'player') {
+    if (state.playbackProvider !== 'spotify') return;
+    Object.assign(state.spotify, { track: event.track, paused: event.paused, position: event.position, duration: event.duration });
+    updateSpotifyNowPlaying();
+  }
+  if (event.type === 'error') {
+    state.spotify.error = event.message;
+    toast(event.message);
+    if (parseRoute().view === 'search') renderSearchResults();
+  }
+}
+
 const ACTIONS = {
+  'spotify-connect': connectSpotify,
+  'spotify-disconnect': disconnectSpotify,
+  'spotify-play': (el) => playSpotifyTrack(el.dataset.spotifyId),
   'play-context': (el) => {
     const ctx = el.dataset.context;
     if (ctx === state.contextId && state.currentId) togglePlay();
@@ -1140,10 +1318,18 @@ function bindPlayerInputs() {
   progress.addEventListener('input', () => {
     state.seeking = true;
     progress.style.setProperty('--val', `${progress.value / 10}%`);
-    if (audio.duration && !state.inAd) $('#time-cur').textContent = fmt((progress.value / 1000) * audio.duration);
+    if (state.playbackProvider === 'spotify' && state.spotify.duration) {
+      $('#time-cur').textContent = fmt((progress.value / 1000) * (state.spotify.duration / 1000));
+    } else if (audio.duration && !state.inAd) {
+      $('#time-cur').textContent = fmt((progress.value / 1000) * audio.duration);
+    }
   });
   progress.addEventListener('change', () => {
-    if (audio.duration && !state.inAd) audio.currentTime = (progress.value / 1000) * audio.duration;
+    if (state.playbackProvider === 'spotify' && state.spotify.duration) {
+      Spotify.seek((progress.value / 1000) * state.spotify.duration).catch((err) => toast(err.message));
+    } else if (audio.duration && !state.inAd) {
+      audio.currentTime = (progress.value / 1000) * audio.duration;
+    }
     state.seeking = false;
   });
   const vol = $('#volume');
@@ -1155,6 +1341,7 @@ function bindPlayerInputs() {
   });
   $('#search-input').addEventListener('input', (e) => {
     state.searchQuery = e.target.value;
+    queueSpotifySearch(state.searchQuery);
     renderSearchResults();
   });
   $('#main').addEventListener('scroll', onMainScroll, { passive: true });
@@ -1250,10 +1437,11 @@ function bindAuthScreen() {
 }
 
 // ---------- Sesión ----------
-function handleUser(user) {
+async function handleUser(user) {
   $('#splash').hidden = true;
   if (!user) {
     state.user = null;
+    await Spotify.disconnect({ clear: true });
     stopPlayback();
     document.title = 'VYREX - Música para todos';
     $('#app').hidden = true;
@@ -1269,6 +1457,18 @@ function handleUser(user) {
   $('#auth-screen').hidden = true;
   $('#app').hidden = false;
   if (!location.hash) history.replaceState(null, '', '#/home');
+  try {
+    if (Spotify.hasPendingCallback()) {
+      await Spotify.completeCallback(user.uid);
+      toast('Spotify se conectó correctamente.');
+    } else {
+      await Spotify.restore(user.uid);
+    }
+  } catch (err) {
+    state.spotify.error = err.message || 'No se pudo completar la conexión con Spotify.';
+  }
+  const spotifyConnection = Spotify.getConnection();
+  Object.assign(state.spotify, { connected: spotifyConnection.connected, ready: spotifyConnection.ready, profile: spotifyConnection.profile });
   updateQuality();
   renderSidebar();
   renderTopbarUser();
@@ -1301,6 +1501,7 @@ async function boot() {
   bindPlayerInputs();
   bindMediaSession();
   bindAuthScreen();
+  Spotify.onEvent(handleSpotifyEvent);
   window.addEventListener('hashchange', () => route());
   Auth.onChange(handleUser);
   try {
