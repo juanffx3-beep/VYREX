@@ -1,6 +1,6 @@
 // Spotify: OAuth con PKCE y Web Playback SDK para la SPA estática de VYREX.
 // El Client ID es público por diseño. Nunca agregues el Client Secret a GitHub Pages.
-const CLIENT_ID = 'ed9590d6316e49d88263e936d374f94f';
+const CLIENT_ID = 'f5fa58d3d8ad46129a626d979fa6a5a8';
 const REDIRECT_URI = 'https://juanffx3-beep.github.io/VYREX';
 const SCOPES = [
   'streaming',
