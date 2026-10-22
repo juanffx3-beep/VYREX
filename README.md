@@ -39,6 +39,15 @@ Este repositorio está preparado para GitHub Pages. Tras habilitar Pages desde l
 
 `https://juanffx3-beep.github.io/VYREX/`
 
+## Catálogo de música
+
+VYREX reproduce música real de dos fuentes:
+
+- **Catálogo propio de demostración:** artistas y playlists de VYREX con pistas de muestra.
+- **Catálogo abierto en línea:** búsqueda y tendencias de música de artistas independientes publicada con licencias abiertas, servida a través de la API pública de Audius y reproducida íntegramente con el reproductor de VYREX (sin cuentas externas ni marcas de terceros en la interfaz).
+
+Las reglas del plan Free (anuncios simulados, límite de saltos) y VIP se aplican a todo el catálogo.
+
 ## Créditos
 
-Las pistas de audio son enlaces de demostración de SoundHelix. Las imágenes de portada se generan con Picsum Photos y solo se usan como contenido visual de demostración.
+Las pistas de demostración local son enlaces de SoundHelix. Las imágenes de portada de demostración se generan con Picsum Photos. El catálogo en línea y sus carátulas pertenecen a sus respectivos artistas, publicados en Audius con licencias abiertas.

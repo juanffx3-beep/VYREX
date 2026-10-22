@@ -1,6 +1,7 @@
 import { TRACKS, ARTISTS, PLAYLISTS, GENRES, trackById, artistById, playlistById, coverUrl } from './data.js';
 import { icon } from './icons.js';
 import * as Auth from './auth.js';
+import * as Audius from './audius.js';
 
 // ---------- Reglas de los planes ----------
 const SONGS_BETWEEN_ADS = 3;   // Free: anuncio cada 3 canciones
@@ -60,8 +61,51 @@ const state = {
   seeking: false,
   searchQuery: '',
   searchIds: [],
+  onlineSearchIds: [],
+  onlineLoading: false,
+  onlineError: '',
+  trendIds: [],
+  trendTracks: [],
   libFilter: null,
 };
+
+// Canciones del catálogo en línea (se resuelven por id; caché para favoritos)
+const ONLINE_CACHE_KEY = 'vyrex:online-cache';
+const onlineTracks = new Map();
+try {
+  Object.values(JSON.parse(localStorage.getItem(ONLINE_CACHE_KEY) || '{}')).forEach((t) => onlineTracks.set(t.id, t));
+} catch { /* caché vacío */ }
+
+function persistOnlineCache() {
+  const entries = [...onlineTracks.entries()].slice(-300);
+  localStorage.setItem(ONLINE_CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
+}
+
+function registerOnline(t) {
+  const track = { ...t, image: t.image || LOGO_SRC };
+  onlineTracks.set(track.id, track);
+  if (Number.isFinite(track.duration)) setDuration(track.id, track.duration);
+}
+
+// Devuelve una canción del catálogo local o del catálogo en línea, con forma unificada.
+function findTrack(id) {
+  const online = onlineTracks.get(id);
+  if (online) return online;
+  const t = trackById(id);
+  if (!t) return null;
+  const a = artistById(t.artistId);
+  return {
+    id: t.id,
+    title: t.title,
+    artistName: a.name,
+    artistId: t.artistId,
+    album: t.album,
+    src: t.src,
+    image: coverUrl(t.cover, 300),
+    duration: state.durations[t.id],
+    local: true,
+  };
+}
 
 const audio = new Audio();
 audio.preload = 'auto';
@@ -112,6 +156,8 @@ function contextIds(ctx) {
   if (ctx === 'liked') return [...state.liked].reverse();
   if (ctx === 'all') return TRACKS.map((t) => t.id);
   if (ctx === 'search') return state.searchIds;
+  if (ctx === 'online-search') return state.onlineSearchIds;
+  if (ctx === 'online-trending') return state.trendIds;
   if (ctx.startsWith('artist:')) return TRACKS.filter((t) => t.artistId === ctx.slice(7)).map((t) => t.id);
   return playlistById(ctx)?.trackIds || [];
 }
@@ -140,7 +186,7 @@ function playContext(ctx, index = 0) {
 }
 
 function startCurrent() {
-  const t = trackById(state.queue[state.queueIndex]);
+  const t = findTrack(state.queue[state.queueIndex]);
   if (!t) return;
   if (!isVip() && state.songsSinceAd >= SONGS_BETWEEN_ADS) {
     state.songsSinceAd = 0;
@@ -149,6 +195,7 @@ function startCurrent() {
   }
   state.songsSinceAd++;
   state.currentId = t.id;
+  if (Number.isFinite(t.duration)) setDuration(t.id, t.duration);
   audio.src = t.src;
   audio.play().catch(() => {});
   updateNowPlaying();
@@ -321,23 +368,27 @@ function setProgressUI(ratio, cur, dur) {
 }
 
 function updateNowPlaying() {
-  const t = trackById(state.currentId);
+  const t = findTrack(state.currentId);
   if (!t) return;
-  const a = artistById(t.artistId);
-  $('#np-cover').src = coverUrl(t.cover, 128);
-  $('#np-cover').alt = `Portada de ${t.album}`;
-  $('#np-title').innerHTML = `<a href="#/playlist/${esc(state.contextId)}">${esc(t.title)}</a>`;
-  if (!playlistById(state.contextId)) $('#np-title').textContent = t.title;
-  $('#np-artist').innerHTML = `<a href="#/artist/${a.id}">${esc(a.name)}</a>`;
-  document.title = `${t.title} • ${a.name} | VYREX`;
+  $('#np-cover').src = t.image;
+  $('#np-cover').alt = `Portada de ${t.album || t.title}`;
+  if (t.local) {
+    $('#np-title').innerHTML = `<a href="#/playlist/${esc(state.contextId)}">${esc(t.title)}</a>`;
+    if (!playlistById(state.contextId)) $('#np-title').textContent = t.title;
+    $('#np-artist').innerHTML = `<a href="#/artist/${t.artistId}">${esc(t.artistName)}</a>`;
+  } else {
+    $('#np-title').textContent = t.title;
+    $('#np-artist').textContent = t.artistName;
+  }
+  document.title = `${t.title} • ${t.artistName} | VYREX`;
   updateLikeButtons(t.id);
   updatePlayingIndicators();
   if ('mediaSession' in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({
       title: t.title,
-      artist: a.name,
-      album: t.album,
-      artwork: [{ src: coverUrl(t.cover, 512), sizes: '512x512', type: 'image/jpeg' }],
+      artist: t.artistName,
+      album: t.album || 'VYREX',
+      artwork: [{ src: t.image, sizes: '480x480', type: 'image/jpeg' }],
     });
   }
 }
@@ -353,7 +404,7 @@ function updatePlayButtons() {
 
 function updatePlayingIndicators() {
   const playing = !audio.paused;
-  $$('.track-row').forEach((r) => {
+  $$('.track-row, .online-row').forEach((r) => {
     r.classList.toggle('is-current', r.dataset.trackId === state.currentId && r.dataset.context === state.contextId);
   });
   $$('[data-action="play-context"]').forEach((b) => {
@@ -471,6 +522,30 @@ function trackCard(t, index, ctx = 'all') {
     </div>`;
 }
 
+function onlineCard(t, index, ctx) {
+  return `
+    <div class="card" role="button" tabindex="0" data-action="play-track" data-context="${ctx}" data-index="${index}" data-track-id="${esc(t.id)}" aria-label="Reproducir ${esc(t.title)}">
+      <div class="card-cover">
+        <img src="${esc(t.image)}" alt="" loading="lazy">
+        <span class="play-fab" aria-hidden="true">${icon('play', 24)}</span>
+      </div>
+      <h3 class="card-title">${esc(t.title)}</h3>
+      <p class="card-sub">${esc(t.artistName)}</p>
+    </div>`;
+}
+
+function onlineRow(t, index, ctx) {
+  if (!t) return '';
+  return `
+    <button class="online-row" data-action="play-track" data-context="${ctx}" data-index="${index}" data-track-id="${esc(t.id)}" aria-label="Reproducir ${esc(t.title)}">
+      <img src="${esc(t.image)}" alt="" loading="lazy">
+      <span class="online-text"><b>${esc(t.title)}</b><small>${esc(t.artistName)}</small></span>
+      <span class="online-genre">${esc(t.genre || '')}</span>
+      <span class="online-dur" data-dur="${esc(t.id)}">${fmt(t.duration)}</span>
+      <span class="online-play">${icon('play', 16)}</span>
+    </button>`;
+}
+
 function shelf(title, items, link) {
   return `
     <section class="shelf">
@@ -574,6 +649,7 @@ function viewHome() {
               ${playFab(q.ctx, 20, 'sm')}
             </a>`).join('')}
         </div>
+        ${state.trendTracks.length ? shelf('Tendencias ahora', state.trendTracks.map((t, i) => onlineCard(t, i, 'online-trending'))) : ''}
         ${shelf('Hecho para ti', ['p8', 'p1', 'p3', 'p5', 'p6', 'p2'].map((id) => playlistCard(playlistById(id))))}
         ${shelf(`${icon('crown', 22)} Exclusivo VIP`, PLAYLISTS.filter((p) => p.vip).map(playlistCard), '#/premium')}
         ${shelf('Canciones del momento', TRACKS.slice(0, 12).map((t, i) => trackCard(t, i)))}
@@ -586,6 +662,53 @@ function viewHome() {
 
 function viewSearch() {
   return { color: '#2a2a2a', html: '<div class="page"><div id="search-results"></div></div>', after: renderSearchResults };
+}
+
+// Búsqueda en el catálogo abierto en línea (tiempo real, con espera breve)
+let onlineTimer = null;
+let onlineReq = 0;
+function queueOnlineSearch(query) {
+  const q = query.trim();
+  clearTimeout(onlineTimer);
+  state.onlineError = '';
+  if (!q) {
+    state.onlineSearchIds = [];
+    state.onlineLoading = false;
+    return;
+  }
+  state.onlineLoading = true;
+  onlineTimer = setTimeout(async () => {
+    const req = ++onlineReq;
+    try {
+      const items = await Audius.search(q);
+      if (req !== onlineReq) return;
+      items.forEach(registerOnline);
+      persistOnlineCache();
+      state.onlineSearchIds = items.map((t) => t.id);
+    } catch {
+      if (req !== onlineReq) return;
+      state.onlineSearchIds = [];
+      state.onlineError = 'No se pudo cargar música en línea. Revisa tu conexión.';
+    } finally {
+      if (req === onlineReq) {
+        state.onlineLoading = false;
+        if (parseRoute().view === 'search') renderSearchResults();
+      }
+    }
+  }, 350);
+}
+
+function onlineSearchSection(q) {
+  if (!q) return '';
+  if (state.onlineLoading) return '<p class="online-status">Buscando música…</p>';
+  if (state.onlineError) return `<p class="online-status">${esc(state.onlineError)}</p>`;
+  const rows = state.onlineSearchIds.map((id, i) => onlineRow(findTrack(id), i, 'online-search')).join('');
+  if (!rows) return '';
+  return `
+    <section class="online-results">
+      <h2 class="section-title">Más canciones</h2>
+      <div class="online-list">${rows}</div>
+    </section>`;
 }
 
 function renderSearchResults() {
@@ -611,9 +734,11 @@ function renderSearchResults() {
   if (!tracks.length && !artists.length && !playlists.length) {
     host.innerHTML = `
       <div class="empty">
-        <h2>No se encontraron resultados para "${esc(state.searchQuery)}"</h2>
-        <p>Revisa la ortografía o usa otras palabras.</p>
-      </div>`;
+        <h2>Sin resultados locales para "${esc(state.searchQuery)}"</h2>
+        <p>Estas son las coincidencias del catálogo en línea:</p>
+      </div>
+      ${onlineSearchSection(q)}`;
+    updatePlayingIndicators();
     return;
   }
   let top = '';
@@ -642,7 +767,8 @@ function renderSearchResults() {
       ${tracks.length ? `<section class="songs-result"><h2 class="section-title">Canciones</h2>${trackTable(tracks.slice(0, 5).map((t) => t.id), 'search', { album: false })}</section>` : ''}
     </div>
     ${artists.length ? shelf('Artistas', artists.map(artistCard)) : ''}
-    ${playlists.length ? shelf('Playlists', playlists.map(playlistCard)) : ''}`;
+    ${playlists.length ? shelf('Playlists', playlists.map(playlistCard)) : ''}
+    ${onlineSearchSection(q)}`;
   updatePlayingIndicators();
 }
 
@@ -1086,7 +1212,7 @@ const ACTIONS = {
 };
 
 function toggleLike(id) {
-  const t = trackById(id);
+  const t = findTrack(id);
   if (!t) return;
   if (state.liked.has(id)) {
     state.liked.delete(id);
@@ -1155,6 +1281,7 @@ function bindPlayerInputs() {
   });
   $('#search-input').addEventListener('input', (e) => {
     state.searchQuery = e.target.value;
+    queueOnlineSearch(state.searchQuery);
     renderSearchResults();
   });
   $('#main').addEventListener('scroll', onMainScroll, { passive: true });
@@ -1311,6 +1438,19 @@ async function boot() {
     authError('No se pudo conectar con el servicio de inicio de sesión.');
   }
   probeDurations();
+  Audius.ensureNode().catch(() => {});
+  loadTrending();
+}
+
+async function loadTrending() {
+  try {
+    const items = await Audius.trending();
+    items.forEach(registerOnline);
+    persistOnlineCache();
+    state.trendTracks = items;
+    state.trendIds = items.map((t) => t.id);
+    if (state.user && parseRoute().view === 'home') route({ keepScroll: true });
+  } catch { /* sin conexión al catálogo */ }
 }
 
 boot();
