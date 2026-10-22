@@ -339,7 +339,7 @@ export async function disconnect({ clear = true } = {}) {
 export async function searchTracks(query) {
   const value = String(query || '').trim();
   if (!value) return [];
-  const payload = await api(`/search?${new URLSearchParams({ q: value, type: 'track', limit: '12', market: 'from_token' })}`);
+  const payload = await api(`/search?${new URLSearchParams({ q: value, type: 'track', limit: '10', market: 'from_token' })}`);
   return (payload.tracks?.items || []).map(normalizeTrack);
 }
 
