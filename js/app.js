@@ -2,6 +2,7 @@ import { TRACKS, ARTISTS, PLAYLISTS, GENRES, trackById, artistById, playlistById
 import { icon } from './icons.js';
 import * as Auth from './auth.js';
 import * as Audius from './audius.js';
+import * as YouTube from './youtube.js';
 
 // ---------- Reglas de los planes ----------
 const SONGS_BETWEEN_ADS = 3;   // Free: anuncio cada 3 canciones
@@ -41,6 +42,8 @@ const logo = (cls = '') => `<img class="logo-img ${cls}" src="${LOGO_SRC}" alt="
 const state = {
   user: null,
   plan: 'free',
+  playbackProvider: 'local',
+  yt: { track: null, paused: true, position: 0, duration: 0, results: [], ids: [], loading: false, error: '', req: 0 },
   liked: new Set(),
   downloaded: new Set(),
   skips: [],
@@ -173,6 +176,13 @@ function playContext(ctx, index = 0) {
   const ids = contextIds(ctx);
   if (!ids.length) return toast('Aún no hay canciones aquí');
   if (state.inAd) return toast('Tu música sigue después del anuncio');
+  if (state.playbackProvider === 'youtube') {
+    YouTube.pause();
+    $('#yt-float').hidden = true;
+    state.yt.track = null;
+    $('#np-like').hidden = false;
+  }
+  state.playbackProvider = 'local';
   state.contextId = ctx;
   state.baseQueue = ids.slice();
   if (state.shuffle) {
@@ -202,6 +212,9 @@ function startCurrent() {
 }
 
 function togglePlay() {
+  if (state.playbackProvider === 'youtube' && state.yt.track) {
+    return state.yt.paused ? YouTube.resume() : YouTube.pause();
+  }
   if (state.inAd) return toast('Tu música sigue después del anuncio');
   if (!state.currentId) return playContext('p1');
   if (audio.paused) audio.play().catch(() => {});
@@ -222,6 +235,7 @@ function canSkip() {
 }
 
 function next(userInitiated = true) {
+  if (state.playbackProvider === 'youtube' && state.yt.track) return nextYouTube();
   if (state.inAd) return toast('Tu música sigue después del anuncio');
   if (!state.queue.length) return;
   if (userInitiated && !canSkip()) return;
@@ -238,6 +252,7 @@ function next(userInitiated = true) {
 }
 
 function prev() {
+  if (state.playbackProvider === 'youtube' && state.yt.track) return prevYouTube();
   if (state.inAd) return toast('Tu música sigue después del anuncio');
   if (!state.queue.length) return;
   if (audio.currentTime > 3 || state.queueIndex === 0) {
@@ -272,6 +287,12 @@ function toggleRepeat() {
 function stopPlayback() {
   audio.pause();
   audio.removeAttribute('src');
+  if (state.playbackProvider === 'youtube') {
+    YouTube.stop();
+    $('#yt-float').hidden = true;
+    state.yt.track = null;
+  }
+  state.playbackProvider = 'local';
   clearInterval(state.adTimer);
   state.inAd = false;
   state.afterAd = null;
@@ -284,6 +305,7 @@ function resetPlayerUI() {
   $('#np-cover').src = LOGO_SRC;
   $('#np-title').textContent = 'VYREX';
   $('#np-artist').textContent = 'Elige una canción';
+  $('#np-like').hidden = false;
   setProgressUI(0, 0, 0);
   updatePlayButtons();
 }
@@ -394,7 +416,8 @@ function updateNowPlaying() {
 }
 
 function updatePlayButtons() {
-  const playing = !audio.paused && !state.inAd;
+  const ytPlaying = state.playbackProvider === 'youtube' && state.yt.track && !state.yt.paused;
+  const playing = ytPlaying || (!audio.paused && !state.inAd);
   document.body.classList.toggle('is-paused', !playing);
   const btn = $('#btn-play');
   btn.innerHTML = icon(playing ? 'pause' : 'play', 18);
@@ -430,6 +453,7 @@ function updateModeButtons() {
 function updateVolumeUI() {
   const v = state.muted ? 0 : state.volume;
   audio.volume = v;
+  if (state.playbackProvider === 'youtube') YouTube.setVolume(v);
   const range = $('#volume');
   range.value = Math.round(v * 100);
   range.style.setProperty('--val', `${v * 100}%`);
@@ -698,6 +722,137 @@ function queueOnlineSearch(query) {
   }, 350);
 }
 
+// ---------- YouTube (búsqueda + reproductor embebido oficial) ----------
+let ytTimer = null;
+let ytTicker = null;
+
+function queueYouTubeSearch(query) {
+  if (!YouTube.isConfigured) return;
+  const q = query.trim();
+  clearTimeout(ytTimer);
+  state.yt.error = '';
+  if (!q) {
+    state.yt.ids = [];
+    state.yt.loading = false;
+    return;
+  }
+  state.yt.loading = true;
+  ytTimer = setTimeout(async () => {
+    const req = ++state.yt.req;
+    try {
+      const items = await YouTube.search(q);
+      if (req !== state.yt.req) return;
+      state.yt.results = items;
+      state.yt.ids = items.map((t) => t.id);
+    } catch {
+      if (req !== state.yt.req) return;
+      state.yt.results = [];
+      state.yt.ids = [];
+      state.yt.error = 'No se pudo buscar en YouTube. Inténtalo más tarde.';
+    } finally {
+      if (req === state.yt.req) {
+        state.yt.loading = false;
+        if (parseRoute().view === 'search') renderSearchResults();
+      }
+    }
+  }, 600);
+}
+
+function ytRow(t) {
+  return `
+    <button class="online-row" data-action="yt-play" data-track-id="${esc(t.id)}" aria-label="Reproducir ${esc(t.title)}">
+      <img src="${esc(t.image)}" alt="" loading="lazy">
+      <span class="online-text"><b>${esc(t.title)}</b><small>${esc(t.artistName)}</small></span>
+      <span class="online-genre">Video</span>
+      <span class="online-dur"></span>
+      <span class="online-play">${icon('play', 16)}</span>
+    </button>`;
+}
+
+function youtubeSearchSection(q) {
+  if (!q || !YouTube.isConfigured) return '';
+  if (state.yt.loading) return '<p class="online-status">Buscando videos y música…</p>';
+  if (state.yt.error) return `<p class="online-status">${esc(state.yt.error)}</p>`;
+  const rows = state.yt.results.map(ytRow).join('');
+  if (!rows) return '';
+  return `
+    <section class="online-results">
+      <h2 class="section-title">Videos y música</h2>
+      <div class="online-list">${rows}</div>
+    </section>`;
+}
+
+function startYtTicker() {
+  clearInterval(ytTicker);
+  ytTicker = setInterval(() => {
+    if (state.playbackProvider !== 'youtube') {
+      clearInterval(ytTicker);
+      return;
+    }
+    const d = YouTube.getDuration();
+    const c = YouTube.getTime();
+    state.yt.duration = d;
+    state.yt.position = c;
+    if (!state.seeking && d) setProgressUI(c / d, c, d);
+  }, 1000);
+}
+
+function updateYouTubeNowPlaying() {
+  const t = state.yt.track;
+  if (!t) return;
+  $('#np-cover').src = t.image || LOGO_SRC;
+  $('#np-cover').alt = t.title;
+  $('#np-title').textContent = t.title;
+  $('#np-artist').textContent = t.artistName;
+  $('#np-like').hidden = true;
+  document.title = `${t.title} • ${t.artistName} | VYREX`;
+}
+
+async function playYouTubeTrack(id) {
+  const t = state.yt.results.find((x) => x.id === id);
+  if (!t) return toast('No se encontró este video.');
+  try {
+    audio.pause();
+    audio.removeAttribute('src');
+    clearInterval(state.adTimer);
+    state.inAd = false;
+    $('#ad-banner').hidden = true;
+    $('#player').classList.remove('ad-mode');
+    Object.assign(state, { playbackProvider: 'youtube', currentId: null, contextId: 'youtube', queue: [], baseQueue: [], queueIndex: -1 });
+    Object.assign(state.yt, { track: t, paused: true, position: 0, duration: 0 });
+    $('#yt-float').hidden = false;
+    $('#yt-float-title').textContent = t.title;
+    updateYouTubeNowPlaying();
+    startYtTicker();
+    updatePlayButtons();
+    await YouTube.play(t.videoId);
+  } catch {
+    toast('No se pudo reproducir este video.');
+  }
+}
+
+function nextYouTube() {
+  const idx = state.yt.ids.indexOf(state.yt.track?.id);
+  if (idx >= 0 && idx < state.yt.ids.length - 1) playYouTubeTrack(state.yt.ids[idx + 1]);
+  else toast('No hay más videos en esta búsqueda');
+}
+
+function prevYouTube() {
+  const idx = state.yt.ids.indexOf(state.yt.track?.id);
+  if (idx > 0) playYouTubeTrack(state.yt.ids[idx - 1]);
+  else YouTube.seek(0);
+}
+
+function closeYouTube() {
+  YouTube.stop();
+  $('#yt-float').hidden = true;
+  if (state.playbackProvider === 'youtube') {
+    state.playbackProvider = 'local';
+    state.yt.track = null;
+    resetPlayerUI();
+  }
+}
+
 function onlineSearchSection(q) {
   if (!q) return '';
   if (state.onlineLoading) return '<p class="online-status">Buscando música…</p>';
@@ -737,7 +892,8 @@ function renderSearchResults() {
         <h2>Sin resultados locales para "${esc(state.searchQuery)}"</h2>
         <p>Estas son las coincidencias del catálogo en línea:</p>
       </div>
-      ${onlineSearchSection(q)}`;
+      ${onlineSearchSection(q)}
+      ${youtubeSearchSection(q)}`;
     updatePlayingIndicators();
     return;
   }
@@ -768,7 +924,8 @@ function renderSearchResults() {
     </div>
     ${artists.length ? shelf('Artistas', artists.map(artistCard)) : ''}
     ${playlists.length ? shelf('Playlists', playlists.map(playlistCard)) : ''}
-    ${onlineSearchSection(q)}`;
+    ${onlineSearchSection(q)}
+    ${youtubeSearchSection(q)}`;
   updatePlayingIndicators();
 }
 
@@ -1150,6 +1307,8 @@ function confirmVipModal() {
 
 // ---------- Acciones (delegación de eventos) ----------
 const ACTIONS = {
+  'yt-play': (el) => playYouTubeTrack(el.dataset.trackId),
+  'yt-close': closeYouTube,
   'play-context': (el) => {
     const ctx = el.dataset.context;
     if (ctx === state.contextId && state.currentId) togglePlay();
@@ -1266,10 +1425,18 @@ function bindPlayerInputs() {
   progress.addEventListener('input', () => {
     state.seeking = true;
     progress.style.setProperty('--val', `${progress.value / 10}%`);
-    if (audio.duration && !state.inAd) $('#time-cur').textContent = fmt((progress.value / 1000) * audio.duration);
+    if (state.playbackProvider === 'youtube' && state.yt.duration) {
+      $('#time-cur').textContent = fmt((progress.value / 1000) * state.yt.duration);
+    } else if (audio.duration && !state.inAd) {
+      $('#time-cur').textContent = fmt((progress.value / 1000) * audio.duration);
+    }
   });
   progress.addEventListener('change', () => {
-    if (audio.duration && !state.inAd) audio.currentTime = (progress.value / 1000) * audio.duration;
+    if (state.playbackProvider === 'youtube' && state.yt.duration) {
+      YouTube.seek((progress.value / 1000) * state.yt.duration);
+    } else if (audio.duration && !state.inAd) {
+      audio.currentTime = (progress.value / 1000) * audio.duration;
+    }
     state.seeking = false;
   });
   const vol = $('#volume');
@@ -1282,6 +1449,7 @@ function bindPlayerInputs() {
   $('#search-input').addEventListener('input', (e) => {
     state.searchQuery = e.target.value;
     queueOnlineSearch(state.searchQuery);
+    queueYouTubeSearch(state.searchQuery);
     renderSearchResults();
   });
   $('#main').addEventListener('scroll', onMainScroll, { passive: true });
@@ -1440,6 +1608,14 @@ async function boot() {
   probeDurations();
   Audius.ensureNode().catch(() => {});
   loadTrending();
+  YouTube.onEvent((e) => {
+    if (e.type === 'state') {
+      state.yt.paused = e.state !== 1;
+      if (state.playbackProvider === 'youtube') updatePlayButtons();
+    }
+    if (e.type === 'ended') nextYouTube();
+    if (e.type === 'error') toast('YouTube no pudo reproducir este video.');
+  });
 }
 
 async function loadTrending() {

@@ -461,3 +461,18 @@ input[type=range]::-moz-range-thumb { width: 12px; height: 12px; border: 0; bord
   .online-row img { width: 44px; height: 44px; }
   .online-genre, .online-dur { display: none; }
 }
+
+/* ---------- Reproductor de video flotante (YouTube) ---------- */
+.yt-float {
+  position: fixed; right: 16px; bottom: calc(var(--player-h) + 16px);
+  width: 360px; max-width: calc(100vw - 32px); background: #181818;
+  border: 1px solid #ffffff22; border-radius: 12px; overflow: hidden;
+  z-index: 45; box-shadow: 0 16px 40px #000c;
+}
+.yt-float-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 6px 6px 12px; }
+.yt-float-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.yt-player { width: 100%; aspect-ratio: 16 / 9; background: #000; }
+
+@media (max-width: 768px) {
+  .yt-float { right: 8px; left: 8px; width: auto; bottom: 150px; }
+}

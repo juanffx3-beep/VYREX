@@ -45,6 +45,7 @@ VYREX reproduce música real de dos fuentes:
 
 - **Catálogo propio de demostración:** artistas y playlists de VYREX con pistas de muestra.
 - **Catálogo abierto en línea:** búsqueda y tendencias de música de artistas independientes publicada con licencias abiertas, servida a través de la API pública de Audius y reproducida íntegramente con el reproductor de VYREX (sin cuentas externas ni marcas de terceros en la interfaz).
+- **Videos y música de YouTube (opcional):** al configurar una clave de YouTube Data API v3 en [`js/youtube-config.js`](js/youtube-config.js), el buscador muestra resultados de YouTube y los reproduce con el reproductor embebido oficial de YouTube dentro de VYREX. VYREX no descarga ni re-aloja ese contenido.
 
 Las reglas del plan Free (anuncios simulados, límite de saltos) y VIP se aplican a todo el catálogo.
 
